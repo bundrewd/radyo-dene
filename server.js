@@ -1,86 +1,115 @@
-let currentTrackId = "";
-        let radioInterval = null;
-        let isListening = false;
-        const player = document.getElementById('radioPlayer');
-        const volumeSlider = document.getElementById('volumeSlider');
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
+const querystring = require('querystring');
+const cookieParser = require('cookie-parser');
+const ytSearch = require('yt-search');
+const youtubedl = require('youtube-dl-exec');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
+
+ffmpeg.setFfmpegPath(ffmpegPath);
+
+const app = express();
+app.set('trust proxy', true); 
+app.use(cors()).use(cookieParser());
+app.use(express.static('public'));
+
+const client_id = process.env.SPOTIFY_CLIENT_ID;
+const client_secret = process.env.SPOTIFY_CLIENT_SECRET;
+const redirect_uri = process.env.REDIRECT_URI;
+
+let hostAccessToken = null;
+let activeListeners = new Map(); 
+
+app.get('/login', (req, res) => {
+    const scope = 'user-read-currently-playing user-read-playback-state';
+    res.redirect('https://accounts.spotify.com/authorize?' +
+        querystring.stringify({ response_type: 'code', client_id, scope, redirect_uri })
+    );
+});
+
+app.get('/callback', async (req, res) => {
+    const code = req.query.code || null;
+    try {
+        const response = await axios({
+            method: 'post',
+            url: 'https://accounts.spotify.com/api/token',
+            data: querystring.stringify({ code, redirect_uri, grant_type: 'authorization_code' }),
+            headers: {
+                'Authorization': 'Basic ' + (Buffer.from(client_id + ':' + client_secret).toString('base64')),
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+        });
+        hostAccessToken = response.data.access_token;
+        res.send('<h1 style="color:#1DB954; text-align:center;">Giriş Başarılı!</h1><p style="text-align:center;">Sekmeyi kapatıp radyoya dönebilirsiniz.</p>');
+    } catch (error) {
+        res.send('Giriş hatası oluştu.');
+    }
+});
+
+app.get('/api/current-track', async (req, res) => {
+    const userIp = req.ip || req.connection.remoteAddress;
+    activeListeners.set(userIp, Date.now());
+    
+    const now = Date.now();
+    activeListeners.forEach((lastSeen, ip) => {
+        if (now - lastSeen > 12000) activeListeners.delete(ip);
+    });
+    const listenerCount = activeListeners.size;
+
+    if (!hostAccessToken) return res.status(401).json({ error: 'Yayıncı henüz giriş yapmadı.', listeners: listenerCount });
+    
+    try {
+        const response = await axios.get('https://api.spotify.com/v1/me/player/currently-playing', {
+            headers: { 'Authorization': 'Bearer ' + hostAccessToken }
+        });
         
-        player.volume = volumeSlider.value;
-        volumeSlider.addEventListener('input', (e) => { player.volume = e.target.value; });
-
-        async function syncTrack() {
-            try {
-                const res = await fetch('/api/current-track');
-                const data = await res.json();
-                
-                document.getElementById('viewers').innerText = data.listeners || 0;
-
-                if (!isListening) return;
-
-                if (data.is_playing) {
-                    if (data.track_id !== currentTrackId) {
-                        currentTrackId = data.track_id;
-                        const startSec = Math.floor(data.progress_ms / 1000);
-                        
-                        // KULLANICIYI BEKLEMESİ İÇİN UYARIYORUZ
-                        document.getElementById('status').innerText = "Sinyal Bekleniyor (10-15 sn sürebilir) ⏳";
-                        document.getElementById('track-name').innerText = data.query.replace(" lyrics", "");
-                        document.getElementById('liveBadge').style.display = 'inline-block';
-                        
-                        if(data.album_art) {
-                            const img = document.getElementById('albumCover');
-                            img.src = data.album_art;
-                            img.style.display = 'block';
-                            document.body.style.backgroundImage = `url('${data.album_art}')`;
-                        }
-                        
-                        player.src = `/api/stream?q=${encodeURIComponent(data.query)}&seek=${startSec}`;
-                        
-                        // GÜVENLİ OYNATMA BAŞLATICI (Hata Çökmesini Engeller)
-                        const playPromise = player.play();
-                        if (playPromise !== undefined) {
-                            playPromise.then(() => {
-                                // Müzik gerçekten başladığında yazıyı değiştir
-                                document.getElementById('status').innerText = "Şu an Çalıyor 🎵";
-                            }).catch(error => {
-                                console.log("Oynatma bekleniyor veya iptal edildi:", error.message);
-                            });
-                        }
-                    } 
-                } else {
-                    resetPlayerInfo("Yayıncı Müzik Dinlemiyor");
-                }
-            } catch (err) { console.error("Veri çekilemedi:", err); }
+        if (response.data && response.data.item) {
+            res.json({
+                is_playing: response.data.is_playing,
+                query: `${response.data.item.artists[0].name} - ${response.data.item.name} lyrics`,
+                progress_ms: response.data.progress_ms,
+                track_id: response.data.item.id,
+                album_art: response.data.item.album.images[0].url,
+                listeners: listenerCount
+            });
+        } else {
+            res.json({ is_playing: false, listeners: listenerCount });
         }
+    } catch (error) {
+        res.status(500).json({ error: 'Şarkı alınamadı', listeners: listenerCount });
+    }
+});
 
-        function startRadio() {
-            isListening = true;
-            document.getElementById('playBtn').style.display = 'none';
-            document.getElementById('stopBtn').style.display = 'block';
-            document.getElementById('status').innerText = "Bağlanıyor...";
-            
-            syncTrack();
-            radioInterval = setInterval(syncTrack, 6000); 
-        }
+app.get('/api/stream', async (req, res) => {
+    const query = req.query.q;
+    const seek = parseInt(req.query.seek) || 0;
+    
+    if (!query) return res.status(400).send('Şarkı belirtilmedi');
 
-        function stopRadio() {
-            isListening = false;
-            clearInterval(radioInterval); 
-            resetPlayerInfo("Yayın Duraklatıldı");
-            player.src = ""; // Önce kaynağı temizle
-            
-            document.getElementById('stopBtn').style.display = 'none';
-            document.getElementById('playBtn').style.display = 'block';
-        }
+    try {
+        const searchResults = await ytSearch(query);
+        if (!searchResults || !searchResults.videos.length) return res.status(404).send('Bulunamadı');
 
-        function resetPlayerInfo(statusMsg) {
-            currentTrackId = ""; 
-            player.pause();
-            document.getElementById('status').innerText = statusMsg;
-            document.getElementById('track-name').innerText = "";
-            document.getElementById('liveBadge').style.display = 'none';
-            document.getElementById('albumCover').style.display = 'none';
-            document.body.style.backgroundImage = 'none';
-        }
+        const videoUrl = searchResults.videos[0].url;
+        const output = await youtubedl(videoUrl, {
+            dumpSingleJson: true, noCheckCertificates: true, noWarnings: true, preferFreeFormats: true, format: 'bestaudio'
+        });
 
-        setInterval(() => { if(!isListening) syncTrack(); }, 6000);
-        syncTrack();
+        res.set('Content-Type', 'audio/webm');
+        ffmpeg(output.url)
+            .setStartTime(seek)
+            .format('webm')
+            .audioCodec('libopus')
+            .on('error', (err) => { if (err.message !== 'Output stream closed') console.error('FFmpeg:', err.message); })
+            .pipe(res, { end: true });
+        
+    } catch (error) {
+        if (!res.headersSent) res.status(500).send('Yayın koptu');
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Sunucu çalışıyor: http://localhost:${PORT}`));
