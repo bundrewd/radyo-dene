@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Canlı Radyo Yayını</title>
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; background-color: #121212; transition: background-image 1s ease-in-out; background-size: cover; background-position: center; }
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(15px); z-index: -1; }
+        .player-box { background: rgba(24, 24, 24, 0.85); padding: 40px; border-radius: 20px; text-align: center; max-width: 350px; width: 100%; box-shadow: 0 10px 30px rgba(0,0,0,0.8); border: 1px solid rgba(255,255,255,0.1); }
+        .album-art { width: 250px; height: 250px; border-radius: 15px; box-shadow: 0 10px 20px rgba(0,0,0,0.5); object-fit: cover; margin-bottom: 20px; display: none; margin-left: auto; margin-right: auto; }
+        .track-info { min-height: 60px; margin-bottom: 20px; }
+        h2 { font-size: 18px; margin: 0 0 10px 0; color: #b3b3b3; }
+        h3 { font-size: 22px; margin: 0; color: #fff; }
+        .controls { display: flex; flex-direction: column; gap: 15px; align-items: center; }
+        button { background-color: #1DB954; color: black; border: none; padding: 15px 30px; border-radius: 50px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; width: 100%; }
+        button:hover { background-color: #1ed760; transform: scale(1.02); }
+        .stop-btn { background-color: transparent; border: 2px solid #b3b3b3; color: white; display: none; }
+        .stop-btn:hover { background-color: rgba(255,255,255,0.1); border-color: white; }
+        
+        .stats { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; font-size: 14px; color: #b3b3b3; font-weight: bold; }
+        .live-badge { background: #e74c3c; color: white; padding: 4px 10px; border-radius: 5px; animation: pulse 2s infinite; display: none; }
+        .listener-count { display: flex; align-items: center; gap: 5px; }
+        
+        .volume-container { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 10px; color: #b3b3b3;}
+        input[type="range"] { flex-grow: 1; accent-color: #1DB954; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div class="overlay"></div>
+
+    <div class="player-box">
+        <div class="stats">
+            <div id="liveBadge" class="live-badge">🔴 CANLI</div>
+            <div class="listener-count">👥 <span id="viewers">0</span> Dinleyici</div>
+        </div>
+
+        <img id="albumCover" class="album-art" src="" alt="Albüm Kapağı">
+        
+        <div class="track-info">
+            <h2 id="status">Radyoya Bağlanın</h2>
+            <h3 id="track-name"></h3>
+        </div>
+        
+        <audio id="radioPlayer" style="display:none;"></audio>
+        
+        <div class="controls">
+            <button id="playBtn" onclick="startRadio()">▶ Yayına Katıl</button>
+            <button id="stopBtn" class="stop-btn" onclick="stopRadio()">⏹ Durdur</button>
+        </div>
+
+        <div class="volume-container">
+            <span>🔉</span>
+            <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="0.5">
+            <span>🔊</span>
+        </div>
+    </div>
+
+    <script>
+        let currentTrackId = "";
+        let radioInterval = null;
+        let isListening = false;
+        const player = document.getElementById('radioPlayer');
+        const volumeSlider = document.getElementById('volumeSlider');
+        
+        player.volume = volumeSlider.value;
+        volumeSlider.addEventListener('input', (e) => { player.volume = e.target.value; });
+
+        async function syncTrack() {
+            try {
+                const res = await fetch('/api/current-track');
+                const data = await res.json();
+                
+                document.getElementById('viewers').innerText = data.listeners || 0;
+
+                if (!isListening) return;
+
+                if (data.is_playing) {
+                    if (data.track_id !== currentTrackId) {
+                        currentTrackId = data.track_id;
+                        const startSec = Math.floor(data.progress_ms / 1000);
+                        
+                        document.getElementById('status').innerText = "Şu an Çalıyor";
+                        document.getElementById('track-name').innerText = data.query.replace(" lyrics", "");
+                        document.getElementById('liveBadge').style.display = 'inline-block';
+                        
+                        // Albüm Kapağı ve Arkaplan Güncellemesi
+                        if(data.album_art) {
+                            const img = document.getElementById('albumCover');
+                            img.src = data.album_art;
+                            img.style.display = 'block';
+                            document.body.style.backgroundImage = `url('${data.album_art}')`;
+                        }
+                        
+                        player.src = `/api/stream?q=${encodeURIComponent(data.query)}&seek=${startSec}`;
+                        player.play();
+                    } 
+                } else {
+                    resetPlayerInfo("Yayıncı Müzik Dinlemiyor");
+                }
+            } catch (err) { console.error(err); }
+        }
+
+        function startRadio() {
+            isListening = true;
+            document.getElementById('playBtn').style.display = 'none';
+            document.getElementById('stopBtn').style.display = 'block';
+            document.getElementById('status').innerText = "Bağlanıyor...";
+            
+            syncTrack();
+            radioInterval = setInterval(syncTrack, 6000); 
+        }
+
+        function stopRadio() {
+            isListening = false;
+            clearInterval(radioInterval); 
+            resetPlayerInfo("Yayın Duraklatıldı");
+            player.src = "";
+            
+            document.getElementById('stopBtn').style.display = 'none';
+            document.getElementById('playBtn').style.display = 'block';
+        }
+
+        function resetPlayerInfo(statusMsg) {
+            currentTrackId = ""; 
+            player.pause();
+            document.getElementById('status').innerText = statusMsg;
+            document.getElementById('track-name').innerText = "";
+            document.getElementById('liveBadge').style.display = 'none';
+            document.getElementById('albumCover').style.display = 'none';
+            document.body.style.backgroundImage = 'none';
+        }
+
+        // Sadece dinleyici sayısını görmek için sayfaya girildiğinde arka planda 6 saniyede bir yokla
+        setInterval(() => { if(!isListening) syncTrack(); }, 6000);
+        syncTrack();
+    </script>
+</body>
+</html>
